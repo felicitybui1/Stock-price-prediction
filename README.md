@@ -4,7 +4,7 @@ The stock market is one of the most widely studied subjects with numerous partic
 
 ## Project Overview
 
-In this project, I applied sentiment analysis using a statistical machine learning model and random forest in an attempt to capture the correlation between the tweets extracted from Twitter and stock’s price market movements. My exploration sought to answer the following research question:
+In this project, I applied sentiment analysis using a statistical machine learning model to capture the correlation between the tweets extracted from Twitter and stock’s price market movements. My exploration sought to answer the following research question:
 
 **How would daily stock prices behave in response to a positive, neutral, or negative sentiment scoring of tweets related to the respective stock?**
 
