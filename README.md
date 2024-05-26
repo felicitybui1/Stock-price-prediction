@@ -1,1 +1,1 @@
-# Stock-price-prediction
+# Stock price prediction - Twitter sentiment analysis - Neural Network 
