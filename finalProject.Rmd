@@ -1,0 +1,646 @@
+---
+title: "Using Sentiment Analysis to Measure the Influence of Stock-related Tweets in Forecasting Technology Sector Stock Prices"
+author: "Felicity Bui"
+date: "April 18, 2023"
+output:
+  html_document: default
+  pdf_document: default
+---
+<style type="text/css">
+  body{
+  font-size: 12pt;
+}
+</style>
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+
+## Introduction
+
+The stock market is one of the most widely studied subjects with numerous participants in research from top financial firms to academia aiming to understand not only how to make accurate predictions but to understand its behavior. Its movements are influenced by various internal and external factors such as political and legal events, economic cycles, and even social media trends. With the rise of social media platforms providing greater transparency, velocity, and exchange of information, it is now easier than ever for financial market participants to follow and analyze the market and individual stock. In this project, sentiment analysis is applied using a statistical machine learning model to capture the correlation between the tweets extracted from Twitter and stock’s price market movements. This project seeks to answer the following research question:
+
+How would daily stock prices behave in response to a positive, neutral, or negative sentiment scoring of tweets related to the respective stock?
+
+## Data Cleaning
+
+Import all the necessary libraries and set the seed to a constant value (1031).
+
+```{r}
+library(stringr)
+library(tm)
+library(SnowballC)
+library(NLP)
+library(textrank)
+library(tidytext)
+library(h2o)
+library(dplyr)
+library(readr)
+library(stringr)
+library(tm)
+library(lexRankr)
+library(vader)
+library(ISLR2)
+library(caret)
+library(ISLR)
+library(caTools)
+library(ggplot2)
+library(mgcv)
+library(dplyr)
+library(ROCR)
+library(car)
+library(leaps)
+library(glmnet)
+library(stringi)
+library(reshape2)
+library(skimr)
+library(rpart)
+library(rpart.plot)
+library(extremeStat)
+library(ranger)
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)
+library(lubridate)
+library(tidyr)
+library(e1071)
+library(tm)
+
+set.seed(1031)
+h2o.init()
+```
+
+Function to clean each tweet by splitting compound words, removing non-ASCII characters, hyperlinks.
+
+```{r}
+clean_tweet <- function(tweet_list, is_bytes = FALSE) {
+  # Load required libraries
+  library(stringr)
+  library(tm)
+  
+  # Define function to split compound words
+  compound_word_split <- function(compound_word) {
+    matches <- gregexpr('.+?(?:(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|$)', compound_word, perl = TRUE)
+    regmatches(compound_word, matches)[[1]]
+  }
+  
+  # Define function to remove non-ASCII characters
+  remove_non_ascii_chars <- function(text) {
+    iconv(text, from = "UTF-8", to = "ASCII//TRANSLIT")
+  }
+  
+  # Define function to remove hyperlinks
+  remove_hyperlinks <- function(text) {
+    gsub("\\bhttps?://\\S+\\b", "", text, perl = TRUE)
+  }
+  
+  # Define stop words and punctuation table
+  stop_words <- stopwords("english")
+  punc_table <- chartr(punctuation, " ", "")
+  
+  # Define function to clean a single tweet
+  get_cleaned_text <- function(text) {
+    cleaned_tweet <- gsub('\"|\'', '', text) %>% 
+      remove_non_ascii_chars() %>% 
+      remove_hyperlinks() %>% 
+      gsub('#', 'HASHTAGSYMBOL', .) %>% 
+      gsub('@', 'ATSYMBOL', .) %>% 
+      str_split(pattern = "\\s+") %>% 
+      unlist() %>% 
+      tolower() %>% 
+      .[! . %in% stop_words & nchar(.) > 1] %>% 
+      sapply(compound_word_split) %>% 
+      paste(collapse = " ") %>% 
+      gsub('HASHTAGSYMBOL', '#', .) %>% 
+      gsub('ATSYMBOL', '@', .)
+    return(cleaned_tweet)
+  }
+  
+  # Define function to clean a list of tweets
+  if (is_bytes) {
+    tweet_list <- sapply(tweet_list, function(x) get_cleaned_text(iconv(x, "UTF-8")))
+  } else {
+    tweet_list <- sapply(tweet_list, get_cleaned_text)
+  }
+  
+  return(tweet_list)
+}
+```
+
+Function to clean the entire dataset for each company
+
+```{r}
+clean_file <- function(company_name) {
+  f = read.csv('original tweets_stocks.csv')
+  punctuation <- c(",", ".", "!", "?", ";", ":", "-", "_", "/", "\\", "|", "(", ")", "[", "]", "{", "}", "<", ">", "\"", "'", "`", "~", "@", "#", "$", "%", "^", "&", "*", "+", "=")
+  tw = clean_tweet(f, is_bytes = FALSE)
+  f$Tweets = tw
+  f1 = subset(f, select = -c(ticker_symbol,tweet_id,close_value,volume,open_value,high_value,low_value,body))
+  write.csv(f1, file = paste0('tweets_', company_name, '.csv'), row.names = F)
+}
+```
+
+Function is used to group all tweets together by day and make a new csv file 
+
+```{r}
+processTweets <- function(company_name) {
+  
+  columns <- c('Date', 'Tweets')
+  data <- data.frame(matrix(nrow = 0, ncol = length(columns)))
+  colnames(data) <- columns
+  
+  df <- read.csv(paste0('tweets_', company_name, '.csv'), header = F, col.names = columns, encoding = 'UTF-8')
+  
+  indx <- 0
+  get_tweet <- ""
+  
+  # get tweets day wise
+  for (i in 1:(nrow(df)-1)) {
+    get_date <- df$Date[i]
+    next_date <- df$Date[i+1]
+    if (!is.na(get_date) && !is.na(next_date) && get_date == next_date) {
+      
+      get_tweet <- paste(get_tweet, df$Tweets[i], sep = " . ")
+    }
+    if (!is.na(get_date) && !is.na(next_date) && get_date != next_date) {
+      
+      data[indx, 'Date'] <- get_date
+      data[indx, 'Tweets'] <- get_tweet
+      indx <- indx + 1
+      get_tweet <- " "
+    }
+  }
+  
+  # save cleaned data to a CSV file
+  write.csv(data, file = paste0('processedTweets_', company_name, '.csv'), row.names = F)
+}
+```
+
+This algorithm is more accurate than the method is currently used for text summarization however, because of the slow runtime due to cpu/gpu limitation, it cannot be used in a practical sense. 
+
+```{r}
+lexrank_top4 <- function(text) {
+  # Run LexRank algorithm
+  top_4 <- lexRank(text,
+                   # Only 1 article; repeat same docid for all of input vector
+                   docId = rep(1, length(text)),
+                   # Return 4 sentences to mimic /u/autotldr's output
+                   n = 4,
+                   continuous = TRUE)
+  
+  # Reorder the top 4 sentences to be in order of appearance in article
+  order_of_appearance <- order(as.integer(gsub("_", "", top_4$sentenceId)))
+  # Extract sentences in order of appearance
+  ordered_top_4 <- top_4[order_of_appearance, "sentence"]
+  
+  # Return the top 3 sentences as a single string
+  s <- paste(ordered_top_4, collapse = " ")
+  return(s)
+}
+```
+
+We read the processed file we generated in the previous step and create and a subset of tweets after 1st april 2017
+
+```{r}
+tweets_subset <- function(company_name) {
+  path = paste0("./processedTweets_", company_name, ".csv")
+  d = read.csv(path)
+  len = nrow(d)
+  d_subset = d[(len-1003) : len,]
+  return(d_subset)
+}
+
+```
+
+This function summarizes the tweets for each day by selecting the first 5 relevant tweets returned by the tibble function. This is not the most efficient approach  however its the only one which works in a reasonable time frame.
+
+```{r}
+summarize_article <- function(article_text) {
+  article_sentences <- tibble(text = article_text) %>%
+    unnest_tokens(sentence, text, token = "sentences") %>%
+    mutate(sentence_id = row_number()) %>%
+    select(sentence_id, sentence) 
+    return(paste0(article_sentences$sentence[1:5], collapse = " "))
+}
+
+```
+
+We apply the summarize article function to all the tweets here and drop the old tweets column to reduce the load on storage 
+
+```{r}
+data_summ = function(df) {
+  df$summ_text = ""
+  for (i in 1 :nrow(df)){
+    df$summ_text[i] = summarize_article(df$Tweets[i])
+  }
+  
+  df1 = subset(df, select = -c(Tweets) )
+  
+  return(df1)
+}
+```
+
+## Sentiment Analysis
+
+We use vader library for the sentiment analysis on the summarized tweets.
+
+```{r}
+sentimentAnalysis <- function(df, company_name) {
+  data = df
+  data$Comp <- ""
+  data$Negative <- ""
+  data$Neutral <- ""
+  data$Positive <- ""
+  for (i in 1:nrow(data)) {
+      sentence_sentiment <- get_vader(data$summ_text[i])
+      data$Comp[i] <- sentence_sentiment['compound']
+      data$Negative[i] <- sentence_sentiment['neg']
+      data$Neutral[i] <- sentence_sentiment['neu']
+      data$Positive[i] <- sentence_sentiment['pos']
+  }
+  data <- data[, !grepl("Unnamed", names(data))] # remove unnamed column
+  data = subset(data, select = -c(summ_text))
+  write.csv(data, file = paste0("sentimentAnalysis_", company_name, ".csv"), row.names = FALSE)
+}
+```
+
+We create a function to visualize the distribution of sentiments across all companies
+
+```{r}
+sentimentDistribution <- function(company_name) {
+  path_sentiment = paste0("./sentimentAnalysis_", company_name, ".csv")
+  df = read.csv(path_sentiment)
+  df$Date <- as.Date(df$Date)
+  df$Month <- months(df$Date)
+  df$Year <- format(df$Date,format="%y")
+  df$week <- floor_date(df$Date, "week")
+  
+  
+  print(ggplot(data=df, aes(x=Date, y=Positive)) +
+          geom_line()+
+          labs(title="df Positive Sentiment",x="Date", y = "Proportion of Positive Sentments")+
+          geom_smooth())
+  
+  print(ggplot(data=df, aes(x=Date, y=Neutral)) +
+          geom_line()+
+          labs(title="df Neutral Sentiment",x="Date", y = "Proportion of Neutral Sentments")+
+          geom_smooth())
+  
+  print(ggplot(data=df, aes(x=Date, y=Negative)) +
+          geom_line()+
+          labs(title="df Negative Sentiment",x="Date", y = "Proportion of Negative Sentments")+
+          geom_smooth())
+  
+  print(ggplot(data = df, aes(x = Date)) +
+          geom_line(aes(y = Positive, color = "Positive")) +
+          geom_smooth(aes(y = Positive, color = "Positive"), color = "black") +
+          geom_line(aes(y = Neutral, color = "Neutral")) +
+          geom_smooth(aes(y = Neutral, color = "Neutral"), color = "black") +
+          geom_line(aes(y = Negative, color = "Negative")) +
+          geom_smooth(aes(y = Negative, color = "Negative"), color = "black") +
+          labs(title = "df Sentiment", x = "Date", y = "Proportion of Sentiments", color = "Sentiment") +
+          scale_color_manual(values = c("Positive" = "blue", "Neutral" = "orange", "Negative" = "red")))
+
+  
+  slices <- c(mean(df$Positive), mean(df$Neutral),mean(df$Negative))
+  lbls <- c("Positive", "Neutral", "Negative")
+  pct <- round(slices/sum(slices)*100)
+  lbls <- paste(lbls, pct) # add percents to labels 
+  lbls <- paste(lbls,"%",sep="") # ad % to labels 
+  title = paste0("Average Proportion of Twitter Sentiment on ", company_name)
+  print(pie(slices,labels = lbls, col=c("#2b8cbe", "#edf8b1","#de2d26"),
+            main=title,
+            sub = "April 2017 - January 2020"))
+}
+```
+
+Next we add adjusted close price of each stock to the the generated sentiment analysis files and drop NA rows because there are no stock prices for weekends and holidays.
+
+```{r}
+add_close_price <- function(company_name) {
+  path_stock = paste0("./stockData_", company_name, ".csv")
+  stocks_df = read.csv(path_stock)
+  
+  path_sentiment = paste0("./sentimentAnalysis_", company_name, ".csv")
+  company_df = read.csv(path_sentiment)
+  
+  merged_df = merge(company_df, subset(stocks_df)[c("Date", "Adj.Close")], 
+                    by = "Date", all.x = TRUE)
+  merged_df = merged_df[!is.na(merged_df$Adj.Close), ]
+  final_path = paste0("./sentimentAnalysisWithPrice_", company_name, ".csv")
+  write.csv(merged_df, final_path, row.names = FALSE)
+}
+```
+
+
+## Random Forest
+
+Building a Random Forest model and running it on the final file
+
+```{r}
+randomForest <- function(company_name) {
+  path = paste0("./sentimentAnalysisWithPrice_", company_name, ".csv")
+  data = read.csv(path)
+  new_data <- data %>% select(-c(Comp))
+  split = createDataPartition(y=new_data$Adj.Close,
+                                   p = 0.7,
+                                   list = F,
+                                   groups = 100)   
+  train = new_data[split,]
+  test = new_data[-split,]
+  
+  ##RANDOM FOREST MODEL WITHOUT TUNING
+  forest_ranger = ranger(Adj.Close~.-Date,
+                              data = train, 
+                              num.trees = 1000)
+  pred_train_forest_ranger = predict(forest_ranger, data = train, num.trees = 1000)
+  rmse_train_forest_ranger = sqrt(mean((pred_train_forest_ranger$predictions - train$Adj.Close)^2))
+
+  #predict on test set
+  pred_test_forest_ranger = predict(forest_ranger, data = test, num.trees = 1000)
+  rmse_test_forest_ranger = sqrt(mean((pred_test_forest_ranger$predictions - test$Adj.Close)^2))
+
+  pred_test_pred_1 = pred_test_forest_ranger$predictions
+  ##RANGER WITH TUNING PARAMETERS
+  trControl=trainControl(method="cv",number=5)
+  tuneGrid = expand.grid(mtry=1:ncol(train)-2, 
+                              splitrule = c('variance','extratrees','maxstat'), 
+                              min.node.size = c(2,5,10,15,20,25))
+  set.seed(1031)
+  cvModel = train(Adj.Close~.-Date,
+                       data=train,
+                       method="ranger",
+                       num.trees=1000,
+                       trControl=trControl,
+                       tuneGrid=tuneGrid)
+  cvModel$bestTune
+
+  set.seed(1031)
+  cv_forest_ranger = ranger(Adj.Close~.-Date,
+                                 data=train,
+                                 num.trees = 1000, 
+                                 mtry=cvModel$bestTune$mtry, 
+                                 min.node.size = cvModel$bestTune$min.node.size, 
+                                 splitrule = cvModel$bestTune$splitrule)
+  
+  pred_train = predict(cv_forest_ranger, data = train, num.trees = 1000)
+  rmse_train_cv_forest_ranger = sqrt(mean((pred_train$predictions - train$Adj.Close)^2))
+
+  #predict tuned RF on test set
+  pred_test = predict (cv_forest_ranger, data = test, num.trees = 1000)
+  rmse_test_cv_forest_ranger = sqrt(mean((pred_test$predictions - test$Adj.Close)^2)) 
+  pred_test_pred = pred_test$predictions
+
+  ################################################################################
+  
+  ## PLOT FOR TUNED RANGER
+  plot_df <- select(data, Date, Adj.Close)
+  test_plot <- plot_df[-split,]
+  df <- cbind(test_plot, pred_test_pred)
+  
+  # Convert Date column to Date format
+  df$Date <- as.Date(df$Date)
+  
+  # Group data by year and month, and select the first day of each month
+  df_monthly <- df %>%
+    group_by(year(Date), month(Date)) %>%
+    slice(1)
+  
+  # Create the plot
+  title = paste0("Random Forest Prediction for ", company_name)
+  print(ggplot(data = df, aes(x = Date)) + 
+    geom_point(aes(y = Adj.Close, color = "Actual")) +
+    geom_point(aes(y = pred_test_pred, color = "Predicted")) +
+    scale_color_manual(values = c("Actual" = "blue", "Predicted" = "red")) +
+    labs(x = "Date", y = "Adj.Close", title = title) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    scale_x_date(date_breaks = "1 month", date_labels = "%Y-%m-%d", minor_breaks = NULL))
+  
+  ## PLOT FOR UN-TUNED RANGER
+  plot_df_untuned <- select(data, Date, Adj.Close)
+  test_plot_untuned <- plot_df_untuned[-split,]
+  df_untuned <- cbind(test_plot_untuned, pred_test_pred_1)
+  
+  # Convert Date column to Date format
+  df_untuned$Date <- as.Date(df_untuned$Date)
+  
+  # Group data by year and month, and select the first day of each month
+  df_monthly_untuned <- df_untuned %>%
+    group_by(year(Date), month(Date)) %>%
+    slice(1)
+  
+  # Create the plot
+  print(ggplot(data = df_untuned, aes(x = Date)) + 
+    geom_point(aes(y = Adj.Close, color = "Actual")) +
+    geom_point(aes(y = pred_test_pred_1, color = "Predicted")) +
+    scale_color_manual(values = c("Actual" = "blue", "Predicted" = "red")) +
+    labs(x = "Date", y = "Adj.Close", title = title) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    scale_x_date(date_breaks = "1 month", date_labels = "%Y-%m-%d", minor_breaks = NULL))
+  
+  return (list(rmse_test_cv_forest_ranger = rmse_test_cv_forest_ranger, rmse_test_forest_ranger = rmse_test_forest_ranger))
+
+}
+```
+
+
+## Support Vector Machine
+
+Building a Support Vector Machine model and running it on the final file
+
+```{r}
+supportVectorMachine <- function(company_name) {
+  path = paste0("./sentimentAnalysisWithPrice_", company_name, ".csv")
+  df = read.csv(path)
+  train <- df[1:floor(0.8*nrow(df)),]
+  test <- df[(floor(0.8*nrow(df))+1):nrow(df),]
+  
+  
+  sentiment_score_list_train <- list()
+  for (date in 1:nrow(train)) {
+    sentiment_score <- c(train[date, "Negative"], train[date, "Neutral"], train[date, "Positive"])
+    sentiment_score_list_train[[date]] <- sentiment_score
+  }
+  
+  numpy_df_train <- do.call(rbind, sentiment_score_list_train)
+  y_train <- as.matrix(train$Adj.Close)
+  
+  sentiment_score_list_test <- list()
+  for (date in 1:nrow(test)) {
+    sentiment_score <- c(test[date, "Negative"], test[date, "Neutral"], test[date, "Positive"])
+    sentiment_score_list_test[[date]] <- sentiment_score
+  }
+  
+  numpy_df_test <- do.call(rbind, sentiment_score_list_test)
+  y_test <- as.matrix(test$Adj.Close)
+  
+  svr_rbf <- svm(x = numpy_df_train, y = y_train, kernel = 'linear', cost = 1e6, maxiter = 1000)
+  output_test_svm <- predict(svr_rbf, numpy_df_test)
+  
+  rmse <- sqrt(mean((y_test - output_test_svm)^2))
+
+  # Combine actual and predicted values into a data frame
+  actual_vs_predicted <- data.frame(Date = as.Date(test$Date), Actual = y_test, Predicted = output_test_svm)
+  
+  # Plot actual and predicted values
+  title = paste0("Support Vector Machine for ", company_name)
+  print(ggplot(data = actual_vs_predicted, aes(x = Date)) +
+    geom_line(aes(y = Actual, color = "Actual")) +
+    geom_line(aes(y = Predicted, color = "Predicted")) +
+    scale_color_manual(values = c("Actual" = "blue", "Predicted" = "red")) +
+    labs(title = title, y = "Price") +
+    theme_bw())
+  return(rmse)
+}
+
+```
+
+
+## Neural Network
+
+Building a Neural Network model and running it on the final file.
+
+```{r}
+
+neuralnetwork <- function(company_name, epochs) {
+  path = paste0("./sentimentAnalysisWithPrice_", company_name, ".csv")
+  df = read.csv(path)
+  
+  df = select(df, c("Adj.Close", "Negative", "Neutral", "Positive"))
+  df = df[!is.na(df$Adj.Close), ]
+  
+ 
+  h2o_data = as.h2o(df)
+
+  split <- h2o.splitFrame(h2o_data, ratios = 0.8, seed = 1031)
+  train_data <- split[[1]]
+  test_data <- split[[2]]
+  
+  x <- names(df[, -1])
+  y <- names(df)[1] 
+  
+  hyper_parameters = list(activation=c('Rectifier','Tanh','Maxout','RectifierWithDropout','TanhWithDropout','MaxoutWithDropout'),
+                          hidden=list(c(20,20),c(50,50),c(100,100,100), c(30,30,30),c(50,50,50,50),c(25,25,25,25)),
+                          l1=seq(0,1e-4,1e-6),
+                          l2=seq(0,1e-4,1e-6))
+  
+  search_criteria = list(strategy='RandomDiscrete',
+                         max_runtime_secs=360,
+                         max_models=100,
+                         seed=1031,
+                         stopping_rounds=5,
+                         stopping_tolerance=1e-2)
+  
+  
+  grid = h2o.grid(algorithm='deeplearning',
+                  grid_id='dl_grid_random',
+                  training_frame = train_data,
+                  validation_frame=test_data,
+                  x=x,
+                  y=y,
+                  epochs=epochs,
+                  hyper_params = hyper_parameters,
+                  search_criteria = search_criteria)
+  
+  grid = h2o.getGrid(grid_id = "dl_grid_random",sort_by="rmse",decreasing=FALSE)
+
+  best_model = h2o.getModel(grid@model_ids[[1]])
+  best_params = best_model@allparameters
+  rmse = grid@summary_table$rmse[1]
+  h2o.rm("dl_grid_random", cascade = TRUE)
+  h2o.rm(best_model, cascade = TRUE)
+  return(rmse)
+}
+
+```
+
+Compiling the complete model
+
+```{r}
+main <- function(company_name) {
+  clean_file(company_name)
+  processTweets(company_name)
+  df = tweets_subset(company_name)
+  summ_data = data_summ(df)
+  sentimentAnalysis(summ_data, company_name)
+  sentimentDistribution(company_name)
+  add_close_price(company_name)
+  rmse_rf = randomForest(company_name)
+  rmse_svm = supportVectorMachine(company_name)
+  rmse_nn = neuralnetwork(company_name, 10)
+  return((list(rmse_test_forest_ranger = rmse_rf$rmse_test_forest_ranger, rmse_test_cv_forest_ranger = rmse_rf$rmse_test_cv_forest_ranger, rmse_svm = rmse_svm, rmse_neural_network = rmse_nn)))
+}
+
+```
+
+## Analysis
+
+We call the main function on each company to make predictions and check how well our model is performing
+
+### Apple
+
+```{r eval = FALSE}
+main('AAPL')
+```
+```{r echo = FALSE}
+sentimentDistribution('AAPL')
+rmse_rf = randomForest('AAPL')
+rmse_svm = supportVectorMachine('AAPL')
+rmse_nn = neuralnetwork('AAPL', 10)
+return((list(rmse_test_forest_ranger = rmse_rf$rmse_test_forest_ranger, rmse_test_cv_forest_ranger = rmse_rf$rmse_test_cv_forest_ranger, rmse_svm = rmse_svm, rmse_neural_network = rmse_nn)))
+```
+
+### Google
+
+```{r eval = FALSE}
+main('GOOG')
+```
+```{r echo = FALSE}
+sentimentDistribution('GOOG')
+rmse_rf = randomForest('GOOG')
+rmse_svm = supportVectorMachine('GOOG')
+rmse_nn = neuralnetwork('GOOG', 10)
+return((list(rmse_test_forest_ranger = rmse_rf$rmse_test_forest_ranger, rmse_test_cv_forest_ranger = rmse_rf$rmse_test_cv_forest_ranger, rmse_svm = rmse_svm, rmse_neural_network = rmse_nn)))
+```
+
+### Tesla
+
+```{r eval = FALSE}
+main('TSLA')
+```
+```{r echo = FALSE}
+sentimentDistribution('TSLA')
+rmse_rf = randomForest('TSLA')
+rmse_svm = supportVectorMachine('TSLA')
+rmse_nn = neuralnetwork('TSLA', 10)
+return((list(rmse_test_forest_ranger = rmse_rf$rmse_test_forest_ranger, rmse_test_cv_forest_ranger = rmse_rf$rmse_test_cv_forest_ranger, rmse_svm = rmse_svm, rmse_neural_network = rmse_nn)))
+```
+
+### Amazon
+
+```{r eval = FALSE}
+main('AMZN')
+```
+```{r echo = FALSE}
+sentimentDistribution('AMZN')
+rmse_rf = randomForest('AMZN')
+rmse_svm = supportVectorMachine('AMZN')
+rmse_nn = neuralnetwork('AMZN', 10)
+return((list(rmse_test_forest_ranger = rmse_rf$rmse_test_forest_ranger, rmse_test_cv_forest_ranger = rmse_rf$rmse_test_cv_forest_ranger, rmse_svm = rmse_svm, rmse_neural_network = rmse_nn)))
+```
+
+### Microsoft
+
+```{r eval = FALSE}
+main('MSFT')
+```
+```{r echo = FALSE}
+sentimentDistribution('MSFT')
+rmse_rf = randomForest('MSFT')
+rmse_svm = supportVectorMachine('MSFT')
+rmse_nn = neuralnetwork('MSFT', 10)
+return((list(rmse_test_forest_ranger = rmse_rf$rmse_test_forest_ranger, rmse_test_cv_forest_ranger = rmse_rf$rmse_test_cv_forest_ranger, rmse_svm = rmse_svm, rmse_neural_network = rmse_nn)))
+```
